@@ -1,31 +1,79 @@
 package main
 
 import (
-	"log"
+	"context"
+	"database/sql"
 	"testing"
 
-	"github.com/matryer/is"
-	"github.com/tailscale/sqlite/cgosqlite"
-	"github.com/tailscale/sqlite/sqliteh"
+	"gohire/proto/gen/api"
+
+	"connectrpc.com/connect"
+	_ "github.com/mattn/go-sqlite3"
 )
 
-func TestContactUpdate(t *testing.T) {
-	is := is.New(t)
-	dbc, err := cgosqlite.Open("db/gohire.db", sqliteh.SQLITE_OPEN_READWRITE, "")
-	is.NoErr(err)
-	defer dbc.Close()
+func setupExistingDB() (*sql.DB, error) {
+	db, err := sql.Open("sqlite3", "db/gohire.db") // Path to your existing DB
+	if err != nil {
+		return nil, err
+	}
 
-	stmt, _, err := dbc.Prepare("update users set password=:password where id=@id", sqliteh.SQLITE_PREPARE_NORMALIZE)
-	is.NoErr(err)
-	defer stmt.Finalize()
+	// Ensure test user exists
+	schema := `
+	DELETE FROM users WHERE id = 'test_user';
+	INSERT INTO users (id, username, first_name, last_name) VALUES
+		('test_user', 'testusername', 'Test', 'User');
+	`
+	_, err = db.Exec(schema)
+	if err != nil {
+		return nil, err
+	}
 
-	is.Equal(stmt.BindParameterIndexSearch("password"), 1)
-	is.Equal(stmt.BindParameterIndexSearch("id"), 2)
+	return db, nil
+}
 
-	stmt.BindText64(1, "linux2024")
-	stmt.BindText64(2, "018f094d3f9f77fcbc2b735444c5017b")
+func TestUpdateUser(t *testing.T) {
+	db, err := setupExistingDB()
+	if err != nil {
+		t.Fatalf("Failed to set up test DB: %v", err)
+	}
+	defer db.Close()
 
-	row, lastInsertRowID, changes, dur, err := stmt.StepResult()
-	log.Println(row, lastInsertRowID, changes, dur, err)
+	apiServer := NewAPIServer(db)
 
+	ctx := context.Background()
+	id := "test_user"
+	firstname := "UpdatedFirstName"
+	lastname := "UpdatedLastName"
+
+	// Create a request
+	req := &connect.Request[api.UpdateUserRequest]{
+		Msg: &api.UpdateUserRequest{
+			Id:        id,
+			FirstName: firstname,
+			LastName:  lastname,
+		},
+	}
+
+	// Call UpdateUser
+	_, err = apiServer.UpdateUser(ctx, req)
+	if err != nil {
+		t.Errorf("expected no error from UpdateUser, got %v", err)
+	}
+
+	// Verify the user was updated
+	getReq := &connect.Request[api.UpdateUserRequest]{
+		Msg: &api.UpdateUserRequest{
+			Id: id,
+		},
+	}
+	resp, err := apiServer.GetUser(ctx, getReq)
+	if err != nil {
+		t.Errorf("expected no error from GetUser, got %v", err)
+	}
+	if resp.Msg.User.FirstName != firstname {
+		t.Errorf("expected first name to be updated to %s, got %s", firstname, resp.Msg.User.FirstName)
+	}
+	if resp.Msg.User.LastName != lastname {
+		t.Errorf("expected last name to be updated to %s, got %s", lastname, resp.Msg.User.LastName)
+	}
 }
